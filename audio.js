@@ -18,11 +18,12 @@
     }
     return y;
   }
-  function resample(x, srIn) {
-    if (srIn === SR) return Float32Array.from(x);
-    var y = x;
-    if (srIn > SR) { y = biquadLP(biquadLP(x, srIn, 7000), srIn, 7000); }
-    var ratio = srIn / SR, n = Math.floor(y.length / ratio), out = new Float32Array(n);
+  function resample(x, srIn, srOut) {
+    srOut = srOut || SR;
+    if (srIn === srOut) return Float32Array.from(x);
+    var y = x, cut = srOut === SR ? 7000 : Math.round(srOut * 0.44);
+    if (srIn > srOut) { y = biquadLP(biquadLP(x, srIn, cut), srIn, cut); }
+    var ratio = srIn / srOut, n = Math.floor(y.length / ratio), out = new Float32Array(n);
     for (var i = 0; i < n; i++) {
       var p = i * ratio, k = Math.floor(p), f = p - k;
       out[i] = (y[k] || 0) * (1 - f) + (y[k + 1] || 0) * f;
@@ -472,6 +473,110 @@
     return out;
   }
 
+  // ---------- 긴 녹음에서 문장 위치 찾기 ----------
+  // 소리 특징만 빠르게 계산 (억양은 계산하지 않음): 10ms마다 MFCC와 소리 크기
+  function features(x16, onProg) {
+    var n = Math.max(0, Math.floor((x16.length - NEED) / HOP) + 1), cep = new Array(n), db = new Float32Array(n), i = 0;
+    return new Promise(function (res) {
+      (function step() {
+        var t0 = Date.now();
+        for (; i < n && Date.now() - t0 < 40; i++) { var off = i * HOP; db[i] = energyDb(x16, off); cep[i] = mfcc(x16, off); }
+        if (onProg) onProg(i / Math.max(1, n));
+        if (i < n) setTimeout(step, 0); else res({ cep: cep, db: db, n: n });
+      })();
+    });
+  }
+  function normCep(X, s, e) {
+    var mean = new Float32Array(NCEP), sd = new Float32Array(NCEP), out = new Array(e - s + 1), k, c, n = e - s + 1;
+    for (k = s; k <= e; k++) for (c = 0; c < NCEP; c++) mean[c] += X[k][c];
+    for (c = 0; c < NCEP; c++) mean[c] /= n;
+    for (k = s; k <= e; k++) for (c = 0; c < NCEP; c++) { var d = X[k][c] - mean[c]; sd[c] += d * d; }
+    for (c = 0; c < NCEP; c++) sd[c] = Math.sqrt(sd[c] / n) + 1e-6;
+    for (k = s; k <= e; k++) { var v = new Float32Array(NCEP); for (c = 0; c < NCEP; c++) v[c] = (X[k][c] - mean[c]) / sd[c]; out[k - s] = v; }
+    return out;
+  }
+  // 기준 문장 Q 가 긴 녹음 R(r0~r1 프레임) 안 어디에 있는지 (시작·끝을 자유롭게 두는 DTW)
+  function findSegment(Q, R, r0, r1, from, jump, dims, SP) {
+    var N = Q.length, INF = 1e18, pen = 0.15, i, j, c, D = dims || NCEP;
+    var pD = new Float64Array(N).fill(INF), pS = new Int32Array(N), cD = new Float64Array(N), cS = new Int32Array(N);
+    var best = { score: INF, cost: INF, s: r0, e: Math.min(r1, r0 + N) }, minL = Math.round(0.45 * N), maxL = Math.round(3.2 * N);
+    for (j = r0; j <= r1; j++) {
+      var y = R[j];
+      for (i = 0; i < N; i++) {
+        var x = Q[i], d = 0; for (c = 0; c < D; c++) { var t = x[c] - y[c]; d += t * t; } d = Math.sqrt(d * NCEP / D);
+        var b, st;
+        if (i === 0) { b = 0; st = j; }
+        else {
+          b = pD[i - 1]; st = pS[i - 1];
+          if (cD[i - 1] + pen < b) { b = cD[i - 1] + pen; st = cS[i - 1]; }
+          if (pD[i] + pen < b) { b = pD[i] + pen; st = pS[i]; }
+        }
+        cD[i] = b + d; cS[i] = st;
+      }
+      var L = j - cS[N - 1] + 1;
+      // 대부분 조용한 구간(쉼·잡음)은 문장으로 보지 않음
+      if (L >= minL && L <= maxL && (!SP || (SP[j + 1] - SP[cS[N - 1]]) >= 0.5 * L)) { var raw = cD[N - 1] / (N + L), nc = raw + (jump || 0) * Math.max(0, cS[N - 1] - (from || r0)) / 100; if (nc < best.score) best = { score: nc, cost: raw, s: cS[N - 1], e: j }; }
+      var tD = pD; pD = cD; cD = tD; var tS = pS; pS = cS; cS = tS;
+    }
+    return best;
+  }
+  // refs: 문장별 기준 음성 분석 [{cep, start, end}], F: 긴 녹음 features() 결과
+  // → 문장별 [{t0, t1, cost, check}] (초, 앞뒤 여유 포함)
+  function splitLong(refs, F, onProg, opts) {
+    opts = opts || {};
+    var JUMP = opts.jump == null ? 0.04 : opts.jump, DIMS = opts.dims || 8; // 앞쪽 MFCC 8개만 (목소리 높낮이 차이에 덜 흔들림), 멀리 건너뛸수록 불리하게
+    var R = normCep(F.cep, 0, F.n - 1), dbs = Array.prototype.slice.call(F.db);
+    var thr = Math.max(pct(dbs, 0.1) + 12, pct(dbs, 0.98) - 38, -58), out = [], k = 0, from = 0;
+    var tempo = [];
+    var SP = new Int32Array(F.n + 1); for (var z = 0; z < F.n; z++) SP[z + 1] = SP[z] + (F.db[z] > thr ? 1 : 0);
+    return new Promise(function (res) {
+      (function step() {
+        if (k >= refs.length) return finishUp();
+        var r = refs[k], Q = normCep(r.cep, r.start, r.end), N = Q.length;
+        var r0 = Math.max(0, from), r1 = k === 0 ? F.n - 1 : Math.min(F.n - 1, from + Math.max(4 * N, 6000));
+        var m = findSegment(Q, R, r0, r1, from, k === 0 ? 0 : JUMP, DIMS, SP);
+        out.push({ s: m.s, e: m.e, cost: m.cost });
+        // 잘 맞은 문장만 다음 찾기의 출발점으로 (잘 안 맞은 문장 하나 때문에 뒤가 다 밀리지 않게)
+        var good = out.filter(function (o) { return o.ok; }).map(function (o) { return o.cost; });
+        var ref = good.length >= 3 ? median(good) : m.cost;
+        m.ok = k === 0 || m.cost <= ref * 1.3 + 0.1; out[k].ok = m.ok;
+        if (m.ok) { from = Math.max(r0, m.e - 10); tempo.push((m.e - m.s + 1) / N); }
+        else { var tp = tempo.length ? median(tempo) : 1.1; from = Math.max(r0, from + Math.round(0.5 * N * tp)); }
+        k++; if (onProg) onProg(k / refs.length);
+        setTimeout(step, 0);
+      })();
+      function finishUp() {
+        var costs = out.map(function (o) { return o.cost; }), med = median(costs), n = out.length, q, f;
+        function sp(fr) { return F.db[fr] > thr; }
+        // 이웃한 두 문장 사이에서 가장 긴 쉼을 경계로 (그 사이 말소리는 가까운 문장에 붙임, 최대 1.5초)
+        var bound = [];
+        for (q = 0; q + 1 < n; q++) {
+          var a = Math.min(out[q].e, out[q + 1].s), b = Math.max(out[q].e, out[q + 1].s);
+          var lo = Math.max(0, a - 20), hi = Math.min(F.n - 1, b + 20), bestLen = 0, bestMid = Math.round((out[q].e + out[q + 1].s) / 2), run = 0;
+          for (f = lo; f <= hi + 1; f++) {
+            if (f <= hi && !sp(f)) run++;
+            else { if (run > bestLen) { bestLen = run; bestMid = f - Math.ceil(run / 2); } run = 0; }
+          }
+          bound.push(bestMid);
+        }
+        out.forEach(function (o, k2) {
+          var L = k2 > 0 ? bound[k2 - 1] : Math.max(0, o.s - 150), Rb = k2 < n - 1 ? bound[k2] : Math.min(F.n - 1, o.e + 100);
+          var s0 = Math.max(L, Math.min(o.s, o.s - 150 > L ? o.s : L)), e0 = Math.min(Rb, o.e);
+          // 경계 안쪽에서 말소리가 시작·끝나는 곳
+          // 이어지는 말소리는 이 문장에 붙임 (최대 3초, 0.35초 넘게 조용하면 멈춤, 이웃 문장과의 경계는 넘지 않음)
+          var st = o.s, en = o.e, gap = 0;
+          for (f = o.s - 1; f >= Math.max(L, o.s - 300); f--) { if (sp(f)) { st = f; gap = 0; } else if (++gap >= 35) break; }
+          gap = 0;
+          for (f = o.e + 1; f <= Math.min(Rb, o.e + 300); f++) { if (sp(f)) { en = f; gap = 0; } else if (++gap >= 35) break; }
+          o.f0 = Math.max(L, st - 15); o.f1 = Math.min(Rb, en + 20);
+          if (o.f1 <= o.f0) { o.f0 = s0; o.f1 = Math.max(e0, s0 + 10); }
+          o.check = o.cost > med * 1.25 + 0.1;
+        });
+        res(out.map(function (o) { return { t0: Math.max(0, o.f0 * HOP / SR), t1: o.f1 * HOP / SR + WIN / SR, cost: o.cost, check: o.check }; }));
+      }
+    });
+  }
+
   // WAV 만들기 (내 목소리 다시 듣기)
   function wavBlobBytes(x, sr) {
     var n = x.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf), i;
@@ -483,7 +588,7 @@
     return buf;
   }
 
-  var api = { SR: SR, HOP: HOP, t2f: t2f, f2t: f2t, Stream: Stream, mapTimes: mapTimes, resample: resample, analyze: analyze, Tracker: Tracker, liveSemitones: liveSemitones, compare: compare, wordFrames: wordFrames, wav: wavBlobBytes };
+  var api = { SR: SR, HOP: HOP, t2f: t2f, f2t: f2t, Stream: Stream, mapTimes: mapTimes, resample: resample, analyze: analyze, Tracker: Tracker, liveSemitones: liveSemitones, compare: compare, wordFrames: wordFrames, wav: wavBlobBytes, features: features, splitLong: splitLong };
   root.Pitch = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

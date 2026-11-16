@@ -74,7 +74,7 @@
     S.screen = st; stopAll(); render();
   });
   function render() {
-    var f = { entry: vEntry, home: vHome, list: vList, practice: vPractice, admin: vAdmin, adminEdit: vAdminEdit }[S.screen] || vEntry;
+    var f = { entry: vEntry, home: vHome, list: vList, practice: vPractice, admin: vAdmin, adminEdit: vAdminEdit, adminRec: vAdminRec }[S.screen] || vEntry;
     f();
   }
 
@@ -166,7 +166,7 @@
   // AI 목소리 키('ai:en-US-…')를 관리자가 정한 순서대로
   function aiKeys(s) {
     var v = s.voices || {}, ord = (S.mat && S.mat.voiceOrder) || [];
-    var ks = Object.keys(v).filter(function (k) { return k.indexOf('ai:') === 0 || k === 'ai'; });
+    var ks = Object.keys(v).filter(function (k) { return k.indexOf('ai:') === 0 || k === 'ai' || k.indexOf('rec:') === 0; });
     return ks.sort(function (a, b) { var x = ord.indexOf(a), y = ord.indexOf(b); return (x < 0 ? 99 : x) - (y < 0 ? 99 : y); });
   }
   function voiceOf(s) {
@@ -182,6 +182,7 @@
   function vLabel(k) {
     if (k === 'coach') return '대표 코치';
     if (k === 'ai') return 'AI 원어민';
+    if (k.indexOf('rec:') === 0) return k.slice(4);
     var v = vInfo(k.replace(/^ai:/, ''));
     return (v[1] ? v[1] + ' ' : '') + v[2];
   }
@@ -665,9 +666,9 @@
       if (!AD.materials.length) h += '<div class="card empty">아직 자료가 없어요.</div>';
       var nV = ((AD.settings || {}).voices || [1]).length;
       AD.materials.forEach(function (m) {
-        h += '<div class="card"><div class="row" style="align-items:flex-start"><div style="flex:1;min-width:0"><b>' + esc(m.title) + '</b><div class="small muted">' + m.count + '문장 · AI 음성 ' + m.voiced + '/' + m.count + (nV > 1 ? ' (목소리 ' + nV + '개)' : '') + (m.open === false ? ' · 숨김' : '') + '</div></div></div>' +
+        h += '<div class="card"><div class="row" style="align-items:flex-start"><div style="flex:1;min-width:0"><b>' + esc(m.title) + '</b><div class="small muted">' + m.count + '문장 · AI 음성 ' + m.voiced + '/' + m.count + (nV > 1 ? ' (목소리 ' + nV + '개)' : '') + (m.open === false ? ' · 숨김' : '') + '</div>' + ((m.recs || []).length ? '<div class="small muted">사람 목소리 · ' + m.recs.map(function (r) { return esc(r.name) + ' ' + r.count + '/' + m.count; }).join(', ') + '</div>' : '') + '</div></div>' +
           '<div class="row" style="margin-top:12px;flex-wrap:wrap"><button class="btn sm" data-gen="' + esc(m.id) + '"' + (AD.hasKey ? '' : ' disabled') + '>' + (m.voiced < m.count ? 'AI 음성 만들기' : 'AI 음성 다시 만들기') + '</button>' +
-          '<button class="btn sm sec" data-ed="' + esc(m.id) + '">수정</button><button class="btn sm sec" data-hide="' + esc(m.id) + '">' + (m.open === false ? '보이기' : '숨기기') + '</button><button class="btn sm sec" data-del="' + esc(m.id) + '">삭제</button></div></div>';
+          '<button class="btn sm sec" data-rec="' + esc(m.id) + '">사람 목소리</button><button class="btn sm sec" data-ed="' + esc(m.id) + '">수정</button><button class="btn sm sec" data-hide="' + esc(m.id) + '">' + (m.open === false ? '보이기' : '숨기기') + '</button><button class="btn sm sec" data-del="' + esc(m.id) + '">삭제</button></div></div>';
       });
       if (!AD.hasKey) h += '<p class="small muted">AI 음성을 만들려면 먼저 ‘AI 음성’ 탭에서 키를 등록해 주세요.</p>';
     } else if (S.tab === 'tts') {
@@ -699,6 +700,7 @@
     if (S.tab === 'mat') {
       document.getElementById('newMat').onclick = function () { ED = { id: '', title: '', sentences: [] }; go('adminEdit'); };
       Array.prototype.forEach.call(app.querySelectorAll('[data-ed]'), function (b) { b.onclick = function () { editMat(b.getAttribute('data-ed')); }; });
+      Array.prototype.forEach.call(app.querySelectorAll('[data-rec]'), function (b) { b.onclick = function () { RC = { mid: b.getAttribute('data-rec'), name: '', mode: '', files: [], items: null }; go('adminRec'); }; });
       Array.prototype.forEach.call(app.querySelectorAll('[data-del]'), function (b) {
         b.onclick = function () { confirmBox('이 자료를 삭제할까요? 문장과 AI 음성, 연습 기록 연결이 모두 지워져요.', '삭제', function () { done(call('adminDeleteMaterial', { pin: S.pin, id: b.getAttribute('data-del') }), '삭제했어요'); }); };
       });
@@ -864,10 +866,222 @@
       '<input class="me" value="' + esc(s.memo || '') + '" placeholder="메모 (선택)"><div class="wchips">' + wchips(s) + '</div><div class="warn">' + warnHtml(s) + '</div></div>';
   }
 
+
+  // ---------- 사람 목소리 (원어민 원본·대표 코치 녹음) ----------
+  var RC = null;
+  function decodeBuf(ab, rate) {
+    return new Promise(function (res, rej) {
+      var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext, c = null;
+      if (rate && OAC) { try { c = new OAC(1, 1, rate); } catch (e) { c = null; } }
+      if (!c) c = ensureCtx();
+      var p = c.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej);
+    });
+  }
+  function monoOf(buf) {
+    var n = buf.length, ch = buf.numberOfChannels, out = new Float32Array(n), c, i;
+    for (c = 0; c < ch; c++) { var d = buf.getChannelData(c); for (i = 0; i < n; i++) out[i] += d[i] / ch; }
+    return out;
+  }
+  function to24k(buf) { var m = monoOf(buf); return buf.sampleRate === 24000 ? m : Pitch.resample(m, buf.sampleRate, 24000); }
+  function aiKeysOf(s) { return Object.keys(s.voices || {}).filter(function (k) { return k.indexOf('ai:') === 0 || k === 'ai'; }); }
+  function firstAi(s) { var ks = Object.keys(s.voices || {}).filter(function (k) { return k.indexOf('ai:') === 0 || k === 'ai'; }); return ks[0] || null; }
+  function numOf(name) { var m = /(\d+)/.exec(name); return m ? +m[1] : null; }
+  function cutSeg(it) { var a = Math.max(0, Math.round(it.t0 * 24000)), b = Math.min(RC.long.length, Math.round(it.t1 * 24000)); return RC.long.subarray(a, Math.max(a + 1, b)); }
+  function segUrl(it) {
+    if (it.url && it.uk === it.t0 + ':' + it.t1) return it.url;
+    if (it.url) URL.revokeObjectURL(it.url);
+    it.url = URL.createObjectURL(new Blob([Pitch.wav(cutSeg(it), 24000)], { type: 'audio/wav' })); it.uk = it.t0 + ':' + it.t1;
+    return it.url;
+  }
+  function vAdminRec() {
+    if (!RC || !AD) return go('admin', false);
+    var mat = AD.materials.filter(function (x) { return x.id === RC.mid; })[0];
+    if (!mat) return go('admin', false);
+    if (!RC.mat) {
+      app.innerHTML = '<div class="top"><button class="ib" id="bk" aria-label="뒤로">' + IC.back + '</button><h1>사람 목소리</h1></div><div class="card empty">불러오는 중…</div>';
+      document.getElementById('bk').onclick = function () { history.back(); };
+      call('material', { id: RC.mid, admin: true }).then(function (m) { RC.mat = m; render(); }).catch(function (e) { toast(e.message, 4000); });
+      return;
+    }
+    var sens = RC.mat.sentences, h = '<div class="top"><button class="ib" id="bk" aria-label="뒤로">' + IC.back + '</button><h1>사람 목소리 · ' + esc(mat.title) + '</h1></div>';
+    h += '<div class="card"><b>올린 목소리</b>';
+    if ((mat.recs || []).length) h += mat.recs.map(function (r) { return '<div class="sl"><span class="tx">' + esc(r.name) + ' <span class="small muted">' + r.count + '/' + mat.count + '문장</span></span><button class="btn sm sec" data-rdel="' + esc(r.name) + '">삭제</button></div>'; }).join('');
+    else h += '<div class="small muted" style="margin-top:6px">아직 없어요. 원어민 원본이나 대표 코치가 읽은 녹음을 올리면 학생이 그 목소리로 듣고 비교해요.</div>';
+    h += '</div>';
+    h += '<div class="card"><b>새로 올리기</b><label class="f">목소리 이름</label><input id="rn" list="rnl" value="' + esc(RC.name) + '" placeholder="예: 원어민 원본, 주아 대표님" maxlength="20">' +
+      '<datalist id="rnl">' + ['원어민 원본', '주아 대표님'].concat((mat.recs || []).map(function (r) { return r.name; })).map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist>' +
+      '<label class="f">녹음 파일</label><input id="rf" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.mp4" multiple>' +
+      '<div class="chips" style="margin-top:10px"><button class="chip' + (RC.mode === 'split' ? ' on' : '') + '" data-md="split">전체 한 파일 (자동으로 나누기)</button><button class="chip' + (RC.mode === 'files' ? ' on' : '') + '" data-md="files">문장마다 한 파일</button></div>' +
+      '<p class="small muted" style="margin:8px 0 0">' + (RC.files.length ? '고른 파일 ' + RC.files.length + '개 · ' : '') + '전체 녹음 1개를 올리면 AI 음성과 비교해서 문장 위치를 찾아 잘라요. 문장별 파일은 파일 이름의 숫자(1, 2, 3…) 순서로 문장에 붙여요. 같은 이름으로 다시 올리면 바뀌어요.</p>' +
+      '<button class="btn" id="ra" style="margin-top:12px">분석하기</button><div class="small muted" id="rp" style="margin-top:8px"></div><div class="err" id="re"></div></div>';
+    if (RC.items) {
+      var nChk = RC.items.filter(function (it) { return it.on && it.check; }).length;
+      h += '<p class="small muted" style="margin:0 0 8px">' + (RC.mode === 'split' ? '자동으로 나눈 결과예요. 듣기로 확인하고, 앞뒤가 잘렸으면 ◀ ▶로 0.2초씩 고쳐 주세요.' : '문장마다 붙은 파일이에요. 틀린 곳은 바꿔 주세요.') + (nChk ? ' <b style="color:var(--warn)">확인 필요 ' + nChk + '개</b>' : '') + '</p>';
+      RC.items.forEach(function (it, i) {
+        var s = sens[i];
+        h += '<div class="card rrow' + (it.on ? '' : ' off') + '" style="padding:12px 14px"><div class="row" style="align-items:flex-start"><div style="flex:1;min-width:0"><b>' + s.n + '</b> <span class="small">' + esc(s.en) + '</span></div>' +
+          (RC.mode === 'split' ? '<button class="tg' + (it.on ? ' on' : '') + '" data-ron="' + i + '" aria-label="넣기"></button>' : '') + '</div>' +
+          '<div class="chips" style="margin-top:8px"><button class="chip" data-rpl="' + i + '"' + (it.on ? '' : ' disabled') + '>' + IC.play + '듣기</button>';
+        if (RC.mode === 'split') {
+          h += '<span class="small muted">' + it.t0.toFixed(1) + '~' + it.t1.toFixed(1) + '초' + (it.check ? ' · <b style="color:var(--warn)">확인 필요</b>' : '') + '</span><span style="flex:1"></span>' +
+            '<button class="chip" data-nd="' + i + ':0:-1">◀ 시작</button><button class="chip" data-nd="' + i + ':0:1">시작 ▶</button><button class="chip" data-nd="' + i + ':1:-1">◀ 끝</button><button class="chip" data-nd="' + i + ':1:1">끝 ▶</button>';
+        } else {
+          h += '<select data-fs="' + i + '" style="flex:1;min-width:0;height:34px"><option value="-1">(없음)</option>' + RC.files.map(function (f, k) { return '<option value="' + k + '"' + (it.fi === k ? ' selected' : '') + '>' + esc(f.name) + '</option>'; }).join('') + '</select>';
+        }
+        h += '</div></div>';
+      });
+      h += '<button class="btn" id="rs">이 목소리로 저장</button>';
+    }
+    app.innerHTML = h;
+    document.getElementById('bk').onclick = function () { history.back(); };
+    var rp = document.getElementById('rp'), re = document.getElementById('re');
+    document.getElementById('rn').oninput = function () { RC.name = this.value; };
+    document.getElementById('rf').onchange = function () {
+      RC.files = Array.prototype.slice.call(this.files || []); RC.items = null; RC.long = null; RC.refKey = null;
+      RC.mode = RC.files.length === 1 && sens.length > 1 ? 'split' : 'files';
+      render();
+    };
+    Array.prototype.forEach.call(app.querySelectorAll('[data-md]'), function (b) { b.onclick = function () { RC.mode = b.getAttribute('data-md'); RC.items = null; render(); }; });
+    Array.prototype.forEach.call(app.querySelectorAll('[data-rdel]'), function (b) {
+      b.onclick = function () {
+        var nm = b.getAttribute('data-rdel');
+        confirmBox('‘' + nm + '’ 목소리를 이 자료에서 지울까요?', '삭제', function () {
+          call('adminDeleteRec', { pin: S.pin, id: RC.mid, name: nm }).then(function (d) { AD = d; RC.mat = null; toast('지웠어요'); render(); }).catch(function (e) { toast(e.message, 4000); });
+        });
+      };
+    });
+    document.getElementById('ra').onclick = function () {
+      var btn = this; re.textContent = '';
+      if (!RC.name.trim()) { re.textContent = '목소리 이름을 적어 주세요.'; return; }
+      if (!RC.files.length) { re.textContent = '녹음 파일을 골라 주세요.'; return; }
+      ensureCtx(); btn.disabled = true;
+      var p = RC.mode === 'split' ? analyzeSplit() : analyzeFiles();
+      p.then(function () { btn.disabled = false; render(); window.scrollTo(0, document.getElementById('ra').getBoundingClientRect().top + window.scrollY - 60); })
+        .catch(function (e) { btn.disabled = false; rp.textContent = ''; re.textContent = e.message || String(e); });
+    };
+    function prog(t) { rp.textContent = t; }
+    function analyzeSplit() {
+      var f = RC.files[0];
+      if (RC.files.length > 1) return Promise.reject(new Error('전체 한 파일로 나누려면 파일을 1개만 골라 주세요.'));
+      if (f.size > 80 * 1024 * 1024) return Promise.reject(new Error('파일이 너무 커요. 80MB 안으로 잘라서 올려 주세요.'));
+      var miss = sens.filter(function (s) { return !firstAi(s); }).map(function (s) { return s.n; });
+      if (miss.length) return Promise.reject(new Error('문장 위치를 찾으려면 AI 음성이 있어야 해요. 먼저 ‘AI 음성 만들기’를 해 주세요. (' + miss.slice(0, 5).join(', ') + '번)'));
+      prog('파일 여는 중…');
+      var x16 = null;
+      return f.arrayBuffer().then(function (ab) { return decodeBuf(ab, 24000); }).then(function (buf) {
+        if (buf.duration > 20 * 60) throw new Error('20분 안쪽 녹음만 나눌 수 있어요. 필요한 부분만 잘라서 올려 주세요.');
+        RC.long = to24k(buf);
+        x16 = Pitch.resample(RC.long, 24000);
+        return Pitch.features(x16, function (r) { prog('소리 분석 중… ' + Math.round(r * 100) + '%'); });
+      }).then(function (F) {
+        // 녹음 목소리 높이: 처음 말소리부터 20초
+        var peak = -100, z; for (z = 0; z < F.n; z++) if (F.db[z] > peak) peak = F.db[z];
+        for (z = 0; z < F.n && F.db[z] < peak - 30; z++);
+        var a0 = Math.min(x16.length - 1, z * Pitch.HOP), hz = Pitch.analyze(x16.subarray(a0, Math.min(x16.length, a0 + 16000 * 20))).medHz;
+        // AI 목소리 중 녹음과 높이가 가장 비슷한 것을 기준으로 (남자 녹음 → 남자 AI 목소리)
+        var cands = aiKeysOf(sens[0]), refs = [], k = 0;
+        RC.refKey = cands[0];
+        var pick = cands.length < 2 ? Promise.resolve() : Promise.all(cands.map(function (key) {
+          return loadRef(sens[0], key).then(function (r) { return { key: key, d: Math.abs(Math.log2(r.an.medHz / hz)) }; }).catch(function () { return { key: key, d: 99 }; });
+        })).then(function (ds) { ds.sort(function (a, b) { return a.d - b.d; }); RC.refKey = ds[0].key; });
+        function next() {
+          if (k >= sens.length) return Promise.resolve();
+          prog('AI 음성 불러오는 중… ' + (k + 1) + '/' + sens.length);
+          var s = sens[k], key = s.voices[RC.refKey] ? RC.refKey : firstAi(s);
+          return loadRef(s, key).then(function (r) { refs.push({ cep: r.an.cep, start: r.an.start, end: r.an.end }); k++; return next(); });
+        }
+        return pick.then(next).then(function () { return Pitch.splitLong(refs, F, function (r) { prog('문장 위치 찾는 중… ' + Math.round(r * 100) + '%'); }); });
+      }).then(function (segs) {
+        RC.items = segs.map(function (g) { return { on: true, t0: g.t0, t1: g.t1, check: g.check }; });
+        prog('');
+      });
+    }
+    function analyzeFiles() {
+      var files = RC.files.slice(), n = sens.length, nums = files.map(function (f) { return numOf(f.name); });
+      var byNum = nums.every(function (x) { return x != null && x >= 1 && x <= n; }) && nums.filter(function (x, i) { return nums.indexOf(x) === i; }).length === nums.length;
+      var order = files.map(function (f, i) { return i; });
+      if (!byNum) order.sort(function (a, b) { return files[a].name.localeCompare(files[b].name, undefined, { numeric: true }); });
+      RC.items = sens.map(function () { return { on: true, fi: -1 }; });
+      if (byNum) nums.forEach(function (x, i) { RC.items[x - 1].fi = i; });
+      else order.forEach(function (fi, k) { if (k < n) RC.items[k].fi = fi; });
+      return Promise.resolve();
+    }
+    if (RC.items) {
+      Array.prototype.forEach.call(app.querySelectorAll('[data-rpl]'), function (b) {
+        b.onclick = function () {
+          var it = RC.items[+b.getAttribute('data-rpl')]; ensureCtx();
+          if (RC.mode === 'split') playUrl(segUrl(it), 1);
+          else if (it.fi >= 0) { if (!it.url || it.ufi !== it.fi) { if (it.url) URL.revokeObjectURL(it.url); it.url = URL.createObjectURL(RC.files[it.fi]); it.ufi = it.fi; } playUrl(it.url, 1); }
+        };
+      });
+      Array.prototype.forEach.call(app.querySelectorAll('[data-ron]'), function (b) { b.onclick = function () { var it = RC.items[+b.getAttribute('data-ron')]; it.on = !it.on; render(); }; });
+      Array.prototype.forEach.call(app.querySelectorAll('[data-nd]'), function (b) {
+        b.onclick = function () {
+          var a = b.getAttribute('data-nd').split(':'), it = RC.items[+a[0]], dlt = 0.2 * +a[2], dur = RC.long.length / 24000;
+          if (a[1] === '0') it.t0 = Math.max(0, Math.min(it.t1 - 0.3, it.t0 + dlt)); else it.t1 = Math.min(dur, Math.max(it.t0 + 0.3, it.t1 + dlt));
+          it.t0 = Math.round(it.t0 * 100) / 100; it.t1 = Math.round(it.t1 * 100) / 100;
+          var y = window.scrollY; render(); window.scrollTo(0, y);
+          playUrl(segUrl(it), 1);
+        };
+      });
+      Array.prototype.forEach.call(app.querySelectorAll('[data-fs]'), function (sel) { sel.onchange = function () { RC.items[+sel.getAttribute('data-fs')].fi = +sel.value; }; });
+      document.getElementById('rs').onclick = function () { saveRec(); };
+    }
+  }
+  function saveRec() {
+    var name = RC.name.trim(), sens = RC.mat.sentences, list = [];
+    RC.items.forEach(function (it, i) { if (RC.mode === 'split' ? it.on : it.fi >= 0) list.push(i); });
+    if (!name) return toast('목소리 이름을 적어 주세요.');
+    if (!list.length) return toast('저장할 문장이 없어요.');
+    var m = document.createElement('div'); m.className = 'modal';
+    m.innerHTML = '<div class="sheet"><b>‘' + esc(name) + '’ 저장 중</b><div class="prog"><i id="pg" style="width:0"></i></div><div class="small muted" id="pt">준비 중…</div><div class="err" id="pe"></div><button class="btn sec" id="pclose" style="margin-top:10px;display:none">닫기</button></div>';
+    document.body.appendChild(m);
+    var pg = m.querySelector('#pg'), pt = m.querySelector('#pt'), pe = m.querySelector('#pe'), errs = [], k = 0;
+    function one(i) {
+      var s = sens[i], it = RC.items[i], pr;
+      if (RC.mode === 'split') {
+        var seg = cutSeg(it);
+        pr = Promise.resolve({ b64: bytesToB64(new Uint8Array(Pitch.wav(seg, 24000))), mime: 'audio/wav', x16: Pitch.resample(seg, 24000) });
+      } else {
+        var f = RC.files[it.fi];
+        pr = f.arrayBuffer().then(function (ab) {
+          var bytes = new Uint8Array(ab.slice(0));
+          var mime = /^audio\//.test(f.type) ? f.type : ({ mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', ogg: 'audio/ogg', mp4: 'audio/mp4' }[(f.name.split('.').pop() || '').toLowerCase()] || 'audio/mpeg');
+          return decodeBuf(ab).then(function (buf) { return { b64: bytesToB64(bytes), mime: mime, x16: Pitch.resample(monoOf(buf), buf.sampleRate) }; });
+        });
+      }
+      return pr.then(function (a) {
+        var an = Pitch.analyze(a.x16), cands = aiKeysOf(s);
+        // 문장별 파일: 처음 한 번, 녹음과 높이가 가장 비슷한 AI 목소리를 단어 시간 기준으로 고름
+        var kp = RC.refKey || cands.length < 2 ? Promise.resolve() : Promise.all(cands.map(function (k2) {
+          return loadRef(s, k2).then(function (r) { return { key: k2, d: Math.abs(Math.log2(r.an.medHz / an.medHz)) }; }).catch(function () { return { key: k2, d: 99 }; });
+        })).then(function (ds) { ds.sort(function (x, y) { return x.d - y.d; }); RC.refKey = ds[0].key; });
+        return kp.then(function () {
+        var key = RC.refKey && s.voices[RC.refKey] ? RC.refKey : firstAi(s);
+        var tp = key ? loadRef(s, key).then(function (r) { return r.times ? Pitch.mapTimes(r.an, r.times, an) : null; }).catch(function () { return null; }) : Promise.resolve(null);
+        return tp.then(function (times) { return call('adminSaveRec', { pin: S.pin, sid: s.id, name: name, b64: a.b64, mime: a.mime, times: times }); });
+        });
+      });
+    }
+    function next() {
+      if (k >= list.length) {
+        pt.textContent = errs.length ? (list.length - errs.length) + '문장 저장, ' + errs.length + '문장은 못 했어요.' : '다 저장했어요! (' + list.length + '문장)';
+        if (errs.length) pe.textContent = errs.slice(0, 3).join(' / ');
+        m.querySelector('#pclose').style.display = '';
+        adminLoad(function () { if (S.screen === 'adminRec') { RC.mat = null; RC.items = null; RC.files = []; RC.long = null; render(); } });
+        return;
+      }
+      var i = list[k]; pt.textContent = (k + 1) + ' / ' + list.length + ' 문장';
+      one(i).catch(function (e) { errs.push(sens[i].n + '번: ' + (e.message || e)); }).then(function () { k++; pg.style.width = Math.round(k / list.length * 100) + '%'; next(); });
+    }
+    m.querySelector('#pclose').onclick = function () { m.remove(); render(); };
+    next();
+  }
+
   // ---------- 시작 ----------
   S.ipaOn = ls('ipa') !== '0'; S.autoRec = ls('auto') === '1'; S.voice = ls('voice') || 'ai';
   try { history.replaceState({ s: 'entry' }, ''); } catch (e) { }
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.__MOCK_API) navigator.serviceWorker.register('sw.js').catch(function () { });
-  window.__app = { S: S, go: go, render: render };
+  window.__app = { S: S, go: go, render: render, rc: function () { return RC; } };
 })();

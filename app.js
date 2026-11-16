@@ -168,12 +168,8 @@
     if (v[S.voice]) return S.voice;
     return v.ai ? 'ai' : (v.coach ? 'coach' : null);
   }
-  function loadRef(s, vk) {
-    if (!vk) return Promise.resolve(null);
-    var key = s.id + ':' + vk;
-    if (refCache[key]) return refCache[key];
-    var v = s.voices[vk];
-    var pr = call('audio', { file: v.file }).then(function (d) {
+  function fetchAudio(file) {
+    return call('audio', { file: file }).then(function (d) {
       var bytes = b64ToBytes(d.b64);
       var url = URL.createObjectURL(new Blob([bytes], { type: d.mime || 'audio/mpeg' }));
       var c = ensureCtx();
@@ -181,10 +177,28 @@
         var p = c.decodeAudioData(bytes.buffer.slice(0), res, rej);
         if (p && p.then) p.then(res, rej);
       }).then(function (buf) {
-        var an = Pitch.analyze(Pitch.resample(buf.getChannelData(0), buf.sampleRate));
-        var words = s.words.map(function (w) { return Object.assign({ syl: Hwp.syllables(w) }, w); });
-        return { url: url, an: an, times: v.times || null, wf: Pitch.wordFrames(an, words, v.times), dur: buf.duration };
+        return { url: url, an: Pitch.analyze(Pitch.resample(buf.getChannelData(0), buf.sampleRate)), dur: buf.duration };
       });
+    });
+  }
+  function loadRef(s, vk) {
+    if (!vk) return Promise.resolve(null);
+    var key = s.id + ':' + vk;
+    if (refCache[key]) return refCache[key];
+    var v = s.voices[vk];
+    var words = s.words.map(function (w) { return Object.assign({ syl: Hwp.syllables(w) }, w); });
+    var pr = fetchAudio(v.file).then(function (m) {
+      var tm = v.times;
+      if (Array.isArray(tm)) return Object.assign(m, { times: tm });
+      if (tm && tm.tf && tm.t) {
+        // 자연스러운 목소리는 단어 시간이 없어서, 기준 음성의 단어 시간을 옮겨 와요
+        return fetchAudio(tm.tf).then(function (ti) { return Object.assign(m, { times: Pitch.mapTimes(ti.an, tm.t, m.an) }); })
+          .catch(function () { return Object.assign(m, { times: null }); });
+      }
+      return Object.assign(m, { times: null });
+    }).then(function (m) {
+      m.wf = Pitch.wordFrames(m.an, words, m.times);
+      return m;
     });
     pr.catch(function () { delete refCache[key]; });
     refCache[key] = pr;
@@ -604,8 +618,9 @@
     call('adminState', { pin: S.pin }).then(function (d) { AD = d; if (ok) ok(); }).catch(function (e) { if (fail) fail(e); else toast(e.message); });
   }
   var VOICES = [
-    ['en-US-Neural2-F', '여성 · Neural2-F (추천)'], ['en-US-Neural2-H', '여성 · Neural2-H'], ['en-US-Neural2-J', '남성 · Neural2-J'], ['en-US-Neural2-D', '남성 · Neural2-D'],
-    ['en-US-Wavenet-F', '여성 · WaveNet-F'], ['en-US-Wavenet-D', '남성 · WaveNet-D']
+    ['en-US-Chirp3-HD-Kore', '여성 · Kore (자연스러움, 추천)'], ['en-US-Chirp3-HD-Aoede', '여성 · Aoede (자연스러움)'], ['en-US-Chirp3-HD-Leda', '여성 · Leda (자연스러움)'],
+    ['en-US-Chirp3-HD-Charon', '남성 · Charon (자연스러움)'], ['en-US-Chirp3-HD-Puck', '남성 · Puck (자연스러움)'], ['en-US-Chirp3-HD-Fenrir', '남성 · Fenrir (자연스러움)'],
+    ['en-US-Neural2-F', '여성 · Neural2-F (예전 방식)'], ['en-US-Neural2-J', '남성 · Neural2-J (예전 방식)']
   ];
   function vAdmin() {
     if (!AD) return adminLoad(render);
@@ -626,8 +641,8 @@
         '<input id="key" type="password" placeholder="API 키 붙여넣기" autocomplete="off"><button class="btn sm" id="saveKey" style="margin-top:8px">키 저장</button>' +
         '<p class="small muted" style="margin:10px 0 0">키는 서버에만 저장되고 화면에 다시 보이지 않아요.</p></div>';
       h += '<div class="card"><b>AI 음성 설정</b><label class="f">목소리</label><select id="vo">' + VOICES.map(function (v) { return '<option value="' + v[0] + '"' + (st.voice === v[0] ? ' selected' : '') + '>' + v[1] + '</option>'; }).join('') + '</select>' +
-        '<label class="f">속도</label><select id="rt">' + [0.85, 0.9, 0.95, 1].map(function (r) { return '<option value="' + r + '"' + (+st.rate === r ? ' selected' : '') + '>' + (r === 1 ? '보통 (1.0)' : r) + '</option>'; }).join('') + '</select>' +
-        '<div class="sw"><div><b style="font-size:15px">발음기호대로 읽기</b><div class="small muted">자료의 발음기호를 AI 음성에 적용해요. 맞지 않는 단어는 자동으로 일반 읽기.</div></div><button class="tg' + (st.phoneme !== false ? ' on' : '') + '" id="ph"></button></div>' +
+        '<label class="f">속도</label><select id="rt">' + [0.85, 0.9, 0.95, 1, 1.05].map(function (r) { return '<option value="' + r + '"' + (+st.rate === r ? ' selected' : '') + '>' + (r === 1 ? '보통 (1.0)' : r) + '</option>'; }).join('') + '</select>' +
+        '<div class="sw"><div><b style="font-size:15px">발음기호대로 읽기</b><div class="small muted">‘예전 방식’ 목소리에서만 써요. 켜면 단어마다 끊겨서 딱딱하게 들릴 수 있어요.</div></div><button class="tg' + (st.phoneme === true ? ' on' : '') + '" id="ph"></button></div>' +
         '<div class="row" style="margin-top:8px"><button class="btn sec" id="test"' + (AD.hasKey ? '' : ' disabled') + '>들어보기</button><button class="btn" id="saveSet">설정 저장</button></div>' +
         '<p class="small muted" style="margin:10px 0 0">설정을 바꾼 뒤에는 자료에서 ‘AI 음성 다시 만들기’를 눌러야 새 목소리로 바뀌어요.</p></div>';
     } else {

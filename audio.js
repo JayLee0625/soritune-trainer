@@ -460,6 +460,18 @@
     };
   }
 
+  // 기준 음성(단어 시간 있음)의 단어 시작 시각을 다른 음성으로 옮기기 (DTW)
+  function mapTimes(src, times, dst) {
+    var path = dtw(src.cep, dst.cep, src.start, src.end, dst.start, dst.end);
+    var mn = new Int32Array(src.n).fill(-1), i;
+    path.forEach(function (p) { if (mn[p[0]] < 0 || p[1] < mn[p[0]]) mn[p[0]] = p[1]; });
+    var last = dst.start;
+    for (i = 0; i < src.n; i++) { if (mn[i] < 0) mn[i] = i < src.start ? dst.start : (i > src.end ? dst.end : last); else last = mn[i]; }
+    var out = times.map(function (t) { var f = Math.min(src.n - 1, Math.max(src.start, t2f(t))); return Math.round(f2t(mn[f]) * 1000) / 1000; });
+    for (i = 1; i < out.length; i++) if (out[i] < out[i - 1]) out[i] = out[i - 1];
+    return out;
+  }
+
   // WAV 만들기 (내 목소리 다시 듣기)
   function wavBlobBytes(x, sr) {
     var n = x.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf), i;
@@ -471,7 +483,7 @@
     return buf;
   }
 
-  var api = { SR: SR, HOP: HOP, t2f: t2f, f2t: f2t, Stream: Stream, resample: resample, analyze: analyze, Tracker: Tracker, liveSemitones: liveSemitones, compare: compare, wordFrames: wordFrames, wav: wavBlobBytes };
+  var api = { SR: SR, HOP: HOP, t2f: t2f, f2t: f2t, Stream: Stream, mapTimes: mapTimes, resample: resample, analyze: analyze, Tracker: Tracker, liveSemitones: liveSemitones, compare: compare, wordFrames: wordFrames, wav: wavBlobBytes };
   root.Pitch = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -163,10 +163,27 @@
     if (ctx.state === 'suspended') ctx.resume().catch(function () { });
     return ctx;
   }
+  // AI 목소리 키('ai:en-US-…')를 관리자가 정한 순서대로
+  function aiKeys(s) {
+    var v = s.voices || {}, ord = (S.mat && S.mat.voiceOrder) || [];
+    var ks = Object.keys(v).filter(function (k) { return k.indexOf('ai:') === 0 || k === 'ai'; });
+    return ks.sort(function (a, b) { var x = ord.indexOf(a), y = ord.indexOf(b); return (x < 0 ? 99 : x) - (y < 0 ? 99 : y); });
+  }
   function voiceOf(s) {
     var v = s.voices || {};
     if (v[S.voice]) return S.voice;
-    return v.ai ? 'ai' : (v.coach ? 'coach' : null);
+    var ks = aiKeys(s);
+    return ks.length ? ks[0] : (v.coach ? 'coach' : null);
+  }
+  function vInfo(name) {
+    for (var i = 0; i < VOICES.length; i++) if (VOICES[i][0] === name) return VOICES[i];
+    return [name, '', String(name).split('-').pop(), ''];
+  }
+  function vLabel(k) {
+    if (k === 'coach') return '대표 코치';
+    if (k === 'ai') return 'AI 원어민';
+    var v = vInfo(k.replace(/^ai:/, ''));
+    return (v[1] ? v[1] + ' ' : '') + v[2];
   }
   function fetchAudio(file) {
     return call('audio', { file: file }).then(function (d) {
@@ -305,9 +322,11 @@
       '<span class="small muted" style="flex:none">' + s.n + ' / ' + m.sentences.length + '</span><button class="ib" id="ls" aria-label="목록">' + IC.list + '</button></div>';
     h += '<div class="card">';
     h += '<div class="chips">';
-    if (voices.ai || voices.coach) {
-      if (voices.ai) h += '<button class="chip' + (vk === 'ai' ? ' on' : '') + '" data-v="ai">AI 원어민</button>';
-      if (voices.coach) h += '<button class="chip' + (vk === 'coach' ? ' on' : '') + '" data-v="coach">대표 코치</button>';
+    var aks = aiKeys(s);
+    if (aks.length || voices.coach) {
+      aks.concat(voices.coach ? ['coach'] : []).forEach(function (k) {
+        h += '<button class="chip' + (vk === k ? ' on' : '') + '" data-v="' + esc(k) + '">' + esc(vLabel(k)) + '</button>';
+      });
     } else h += '<span class="chip">기기 음성 (AI 음성 준비 중)</span>';
     h += '<span style="flex:1"></span><button class="chip' + (S.ipaOn ? ' on' : '') + '" id="ipaT">발음기호</button></div>';
     h += '<div class="sent" id="sent">' + sentHtml(s, null) + '</div>';
@@ -617,11 +636,26 @@
   function adminLoad(ok, fail) {
     call('adminState', { pin: S.pin }).then(function (d) { AD = d; if (ok) ok(); }).catch(function (e) { if (fail) fail(e); else toast(e.message); });
   }
+  // [이름, 성별, 짧은 이름, 느낌] — 구글 Chirp 3 HD (자연스러운 목소리)
   var VOICES = [
-    ['en-US-Chirp3-HD-Kore', '여성 · Kore (자연스러움, 추천)'], ['en-US-Chirp3-HD-Aoede', '여성 · Aoede (자연스러움)'], ['en-US-Chirp3-HD-Leda', '여성 · Leda (자연스러움)'],
-    ['en-US-Chirp3-HD-Charon', '남성 · Charon (자연스러움)'], ['en-US-Chirp3-HD-Puck', '남성 · Puck (자연스러움)'], ['en-US-Chirp3-HD-Fenrir', '남성 · Fenrir (자연스러움)'],
-    ['en-US-Neural2-F', '여성 · Neural2-F (예전 방식)'], ['en-US-Neural2-J', '남성 · Neural2-J (예전 방식)']
+    ['en-US-Chirp3-HD-Kore', '여성', 'Kore', '또렷하고 단단함 · 추천'],
+    ['en-US-Chirp3-HD-Aoede', '여성', 'Aoede', '산뜻함'],
+    ['en-US-Chirp3-HD-Leda', '여성', 'Leda', '젊은 톤'],
+    ['en-US-Chirp3-HD-Charon', '남성', 'Charon', '차분한 설명 톤'],
+    ['en-US-Chirp3-HD-Orus', '남성', 'Orus', '단단하고 묵직함'],
+    ['en-US-Chirp3-HD-Algenib', '남성', 'Algenib', '허스키한 저음'],
+    ['en-US-Chirp3-HD-Alnilam', '남성', 'Alnilam', '단단함'],
+    ['en-US-Chirp3-HD-Iapetus', '남성', 'Iapetus', '또렷함'],
+    ['en-US-Chirp3-HD-Enceladus', '남성', 'Enceladus', '숨소리 섞인 부드러움'],
+    ['en-US-Chirp3-HD-Schedar', '남성', 'Schedar', '고른 톤'],
+    ['en-US-Chirp3-HD-Rasalgethi', '남성', 'Rasalgethi', '설명 톤'],
+    ['en-US-Chirp3-HD-Umbriel', '남성', 'Umbriel', '편안함'],
+    ['en-US-Chirp3-HD-Puck', '남성', 'Puck', '경쾌함'],
+    ['en-US-Chirp3-HD-Fenrir', '남성', 'Fenrir', '들뜬 톤'],
+    ['en-US-Neural2-F', '여성', 'Neural2-F', '예전 방식'],
+    ['en-US-Neural2-J', '남성', 'Neural2-J', '예전 방식']
   ];
+  var MAX_VOICES = 4;
   function vAdmin() {
     if (!AD) return adminLoad(render);
     var h = '<div class="top">' + logo(36) + '<h1>관리자</h1><button class="ib" id="out" aria-label="나가기">' + IC.out + '</button></div>';
@@ -629,8 +663,9 @@
     if (S.tab === 'mat') {
       h += '<button class="btn" id="newMat" style="margin-bottom:14px">+ 새 자료 올리기</button>';
       if (!AD.materials.length) h += '<div class="card empty">아직 자료가 없어요.</div>';
+      var nV = ((AD.settings || {}).voices || [1]).length;
       AD.materials.forEach(function (m) {
-        h += '<div class="card"><div class="row" style="align-items:flex-start"><div style="flex:1;min-width:0"><b>' + esc(m.title) + '</b><div class="small muted">' + m.count + '문장 · AI 음성 ' + m.voiced + '/' + m.count + (m.open === false ? ' · 숨김' : '') + '</div></div></div>' +
+        h += '<div class="card"><div class="row" style="align-items:flex-start"><div style="flex:1;min-width:0"><b>' + esc(m.title) + '</b><div class="small muted">' + m.count + '문장 · AI 음성 ' + m.voiced + '/' + m.count + (nV > 1 ? ' (목소리 ' + nV + '개)' : '') + (m.open === false ? ' · 숨김' : '') + '</div></div></div>' +
           '<div class="row" style="margin-top:12px;flex-wrap:wrap"><button class="btn sm" data-gen="' + esc(m.id) + '"' + (AD.hasKey ? '' : ' disabled') + '>' + (m.voiced < m.count ? 'AI 음성 만들기' : 'AI 음성 다시 만들기') + '</button>' +
           '<button class="btn sm sec" data-ed="' + esc(m.id) + '">수정</button><button class="btn sm sec" data-hide="' + esc(m.id) + '">' + (m.open === false ? '보이기' : '숨기기') + '</button><button class="btn sm sec" data-del="' + esc(m.id) + '">삭제</button></div></div>';
       });
@@ -640,11 +675,19 @@
       h += '<div class="card"><b>구글 클라우드 API 키</b><div class="small muted" style="margin:4px 0 10px">' + (AD.hasKey ? '등록됨 (끝자리 ' + esc(AD.keyHint) + ')' : '아직 없어요') + '</div>' +
         '<input id="key" type="password" placeholder="API 키 붙여넣기" autocomplete="off"><button class="btn sm" id="saveKey" style="margin-top:8px">키 저장</button>' +
         '<p class="small muted" style="margin:10px 0 0">키는 서버에만 저장되고 화면에 다시 보이지 않아요.</p></div>';
-      h += '<div class="card"><b>AI 음성 설정</b><label class="f">목소리</label><select id="vo">' + VOICES.map(function (v) { return '<option value="' + v[0] + '"' + (st.voice === v[0] ? ' selected' : '') + '>' + v[1] + '</option>'; }).join('') + '</select>' +
+      var on = st.voices || (st.voice ? [st.voice] : []);
+      h += '<div class="card"><b>AI 원어민 목소리</b><div class="small muted" style="margin:4px 0 6px">학생이 연습할 때 고를 수 있는 목소리예요. 최대 ' + MAX_VOICES + '개까지 켤 수 있고, 맨 위에 켜진 목소리가 기본이에요. <b>듣기</b>로 먼저 들어 보세요.</div>' +
+        '<div id="vlist">' + VOICES.map(function (v) {
+          return '<div class="vrow"><div class="vtx"><b>' + v[1] + ' · ' + esc(v[2]) + '</b><span class="small muted">' + esc(v[3]) + '</span></div>' +
+            '<button class="chip vpv" data-pv="' + v[0] + '"' + (AD.hasKey ? '' : ' disabled') + '>' + IC.play + '듣기</button>' +
+            '<button class="tg' + (on.indexOf(v[0]) >= 0 ? ' on' : '') + '" data-vs="' + v[0] + '" aria-label="' + esc(v[2]) + ' 켜기"></button></div>';
+        }).join('') + '</div>' +
+        '<div class="small muted" id="vcount" style="margin-top:8px"></div></div>' +
+        '<div class="card"><b>읽기 설정</b>' +
         '<label class="f">속도</label><select id="rt">' + [0.85, 0.9, 0.95, 1, 1.05].map(function (r) { return '<option value="' + r + '"' + (+st.rate === r ? ' selected' : '') + '>' + (r === 1 ? '보통 (1.0)' : r) + '</option>'; }).join('') + '</select>' +
         '<div class="sw"><div><b style="font-size:15px">발음기호대로 읽기</b><div class="small muted">‘예전 방식’ 목소리에서만 써요. 켜면 단어마다 끊겨서 딱딱하게 들릴 수 있어요.</div></div><button class="tg' + (st.phoneme === true ? ' on' : '') + '" id="ph"></button></div>' +
-        '<div class="row" style="margin-top:8px"><button class="btn sec" id="test"' + (AD.hasKey ? '' : ' disabled') + '>들어보기</button><button class="btn" id="saveSet">설정 저장</button></div>' +
-        '<p class="small muted" style="margin:10px 0 0">설정을 바꾼 뒤에는 자료에서 ‘AI 음성 다시 만들기’를 눌러야 새 목소리로 바뀌어요.</p></div>';
+        '<button class="btn" id="saveSet" style="margin-top:8px">설정 저장</button>' +
+        '<p class="small muted" style="margin:10px 0 0">목소리를 새로 켰다면 저장한 뒤 ‘자료’ 탭에서 <b>AI 음성 만들기</b>를 눌러 주세요. 새로 켠 목소리만 추가로 만들어요. 속도를 바꿨다면 ‘AI 음성 다시 만들기’를 눌러야 바뀌어요.</p></div>';
     } else {
       h += '<div class="card"><b>코치 추가</b><div class="row" style="margin-top:10px"><input id="cn" placeholder="이름"><button class="btn sm" id="addC" style="flex:none">추가</button></div></div>';
       h += '<div class="card" style="padding:6px 16px">' + (AD.coaches.length ? AD.coaches.map(function (c) { return '<div class="sl"><span class="tx">' + esc(c) + '</span><button class="btn sm sec" data-rc="' + esc(c) + '">삭제</button></div>'; }).join('') : '<div class="empty">등록된 코치가 없어요.</div>') + '</div>';
@@ -663,7 +706,7 @@
       Array.prototype.forEach.call(app.querySelectorAll('[data-gen]'), function (b) {
         b.onclick = function () {
           var id = b.getAttribute('data-gen'), m = AD.materials.filter(function (x) { return x.id === id; })[0];
-          if (m.voiced >= m.count) confirmBox('지금 설정으로 AI 음성을 모두 새로 만들까요?', '다시 만들기', function () { generate(id, true); });
+          if (m.voiced >= m.count) confirmBox('지금 설정으로 AI 음성을 모두 새로 만들까요? (켜 둔 목소리 모두 다시 만들어요)', '다시 만들기', function () { generate(id, true); });
           else generate(id, false);
         };
       });
@@ -673,17 +716,45 @@
         done(call('adminSetKey', { pin: S.pin, key: k }), '키를 저장했어요');
       };
       var ph = document.getElementById('ph'); ph.onclick = function () { ph.classList.toggle('on'); };
-      function settings() { return { voice: document.getElementById('vo').value, rate: +document.getElementById('rt').value, phoneme: ph.classList.contains('on') }; }
-      document.getElementById('saveSet').onclick = function () { done(call('adminSettings', Object.assign({ pin: S.pin }, settings())), '설정을 저장했어요'); };
-      document.getElementById('test').onclick = function () {
-        var t = this; t.disabled = true; t.textContent = '만드는 중…'; ensureCtx();
-        call('adminTestVoice', Object.assign({ pin: S.pin }, settings())).then(function (d) {
-          t.disabled = false; t.textContent = '들어보기';
-          var u = URL.createObjectURL(new Blob([b64ToBytes(d.b64)], { type: 'audio/mpeg' }));
-          playUrl(u, 1);
-          if (d.note) toast(d.note, 4000);
-        }).catch(function (e) { t.disabled = false; t.textContent = '들어보기'; toast(e.message, 5000); });
+      function chosen() { return Array.prototype.map.call(app.querySelectorAll('[data-vs].on'), function (b) { return b.getAttribute('data-vs'); }); }
+      function showCount() {
+        var c = chosen();
+        document.getElementById('vcount').textContent = c.length ? '켜진 목소리 ' + c.length + '개: ' + c.map(function (n) { var v = vInfo(n); return v[1] + ' ' + v[2]; }).join(', ') : '목소리를 하나 이상 켜 주세요.';
+      }
+      showCount();
+      Array.prototype.forEach.call(app.querySelectorAll('[data-vs]'), function (b) {
+        b.onclick = function () {
+          if (!b.classList.contains('on') && chosen().length >= MAX_VOICES) return toast('목소리는 ' + MAX_VOICES + '개까지 켤 수 있어요. 다른 목소리를 먼저 꺼 주세요.', 3500);
+          b.classList.toggle('on'); showCount();
+        };
+      });
+      function settings() { return { voices: chosen(), rate: +document.getElementById('rt').value, phoneme: ph.classList.contains('on') }; }
+      document.getElementById('saveSet').onclick = function () {
+        if (!chosen().length) return toast('목소리를 하나 이상 켜 주세요.');
+        done(call('adminSettings', Object.assign({ pin: S.pin }, settings())), '설정을 저장했어요');
       };
+      var pvCache = {};
+      Array.prototype.forEach.call(app.querySelectorAll('[data-pv]'), function (b) {
+        var label = b.innerHTML;
+        b.onclick = function () {
+          var name = b.getAttribute('data-pv'), rate = +document.getElementById('rt').value, ck = name + '|' + rate + '|' + ph.classList.contains('on');
+          ensureCtx();
+          if (b.classList.contains('on')) { stopPlay(); b.classList.remove('on'); return; }
+          function play(u) {
+            Array.prototype.forEach.call(app.querySelectorAll('[data-pv].on'), function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            playUrl(u, 1).then(function () { b.classList.remove('on'); });
+          }
+          if (pvCache[ck]) return play(pvCache[ck]);
+          b.disabled = true; b.textContent = '만드는 중…';
+          call('adminTestVoice', { pin: S.pin, voice: name, rate: rate, phoneme: ph.classList.contains('on') }).then(function (d) {
+            b.disabled = false; b.innerHTML = label;
+            pvCache[ck] = URL.createObjectURL(new Blob([b64ToBytes(d.b64)], { type: 'audio/mpeg' }));
+            play(pvCache[ck]);
+            if (d.note) toast(d.note, 4000);
+          }).catch(function (e) { b.disabled = false; b.innerHTML = label; toast(e.message, 5000); });
+        };
+      });
     } else {
       document.getElementById('addC').onclick = function () { var v = document.getElementById('cn').value.trim(); if (v) done(call('adminCoach', { pin: S.pin, add: v }), '추가했어요'); };
       Array.prototype.forEach.call(app.querySelectorAll('[data-rc]'), function (b) { b.onclick = function () { confirmBox(b.getAttribute('data-rc') + ' 코치를 삭제할까요? (연습 기록은 남아요)', '삭제', function () { done(call('adminCoach', { pin: S.pin, remove: b.getAttribute('data-rc') })); }); }; });
@@ -705,12 +776,12 @@
       call('adminGenerate', { pin: S.pin, id: id, force: !!(force && first) }).then(function (d) {
         var dn = d.total - d.remaining;
         pg.style.width = Math.round(dn / Math.max(1, d.total) * 100) + '%';
-        pt.textContent = dn + ' / ' + d.total + ' 문장';
+        pt.textContent = (d.voices > 1 ? '음성 ' + dn + ' / ' + d.total + '개 (' + d.sentences + '문장 × 목소리 ' + d.voices + '개)' : dn + ' / ' + d.total + ' 문장');
         (d.errors || []).forEach(function (e) { errs.push(e); });
         if (d.notes && d.notes.length) pe.style.color = 'var(--sub)';
         if (d.remaining > 0 && !d.stop) step(false);
         else {
-          pt.textContent = d.remaining ? '일부 문장을 만들지 못했어요.' : '다 만들었어요! (' + d.total + '문장)';
+          pt.textContent = d.remaining ? '일부 음성을 만들지 못했어요.' : '다 만들었어요! (' + (d.voices > 1 ? d.sentences + '문장 × 목소리 ' + d.voices + '개' : d.total + '문장') + ')';
           if (errs.length) pe.textContent = errs.slice(0, 3).join(' / ');
           m.querySelector('#pclose').style.display = '';
           adminLoad();

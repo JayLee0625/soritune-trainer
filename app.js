@@ -79,10 +79,15 @@
   }
 
   // ---------- 입장 ----------
+  // 이 기기에서 들어갔던 이름 (최근 순, 6개까지)
+  function recentNames() { var a = []; try { a = JSON.parse(ls('names') || '[]'); } catch (e) { } if (!a.length && ls('name')) a = [ls('name')]; return a.filter(function (x) { return typeof x === 'string' && x; }); }
+  function saveRecent(a) { ls('names', JSON.stringify(a.slice(0, 6))); }
   function vEntry() {
+    var recent = recentNames();
     app.innerHTML = '<div class="entry">' + kakaoBar() + logo(68, true) +
       '<h2>' + APP + '</h2><p class="muted">올린 자료 문장을 원어민처럼 — 듣고, 따라 말하고, 억양을 비교해요.</p>' +
-      '<input id="nm" placeholder="코치 이름" autocomplete="off" list="coachList" value="' + esc(ls('name') || '') + '">' +
+      (recent.length ? '<div class="small muted" style="margin-bottom:-6px">최근 들어간 이름 · 누르면 바로 들어가요</div><div class="recent">' + recent.map(function (n, i) { return '<span class="rn"><button class="rnb" data-rn="' + i + '">' + esc(n) + '</button><button class="rnx" data-rx="' + i + '" aria-label="' + esc(n) + ' 지우기">×</button></span>'; }).join('') + '</div>' : '') +
+      '<input id="nm" placeholder="' + (recent.length ? '다른 이름으로 들어가기' : '코치 이름') + '" autocomplete="off" list="coachList" value="' + (recent.length ? '' : esc(ls('name') || '')) + '">' +
       '<datalist id="coachList"></datalist>' +
       '<button class="btn" id="enter">들어가기</button><div class="err" id="er"></div>' +
       '<p class="small muted center">관리자는 이름 칸에 <b>admin</b>을 입력해요.</p></div>';
@@ -96,18 +101,26 @@
       }).catch(function (e) { er.textContent = e.message; });
     }
     bootThen(function () { });
-    function enter() {
-      var v = nm.value.trim(); if (!v) { er.textContent = '이름을 입력해 주세요.'; return; }
+    function enter(given) {
+      var v = (typeof given === 'string' ? given : nm.value).trim(); if (!v) { er.textContent = '이름을 입력해 주세요.'; return; }
       er.textContent = '';
       if (v.toLowerCase() === 'admin') { bootThen(function () { adminGate(); }); return; }
       bootThen(function () {
         call('enter', { name: v }).then(function (r) {
           S.coach = r.name; S.best = r.best || {}; S.mats = r.materials || S.mats; ls('name', r.name);
+          saveRecent([r.name].concat(recentNames().filter(function (x) { return x !== r.name; })));
           go('home');
-        }).catch(function (e) { er.textContent = e.message; });
+        }).catch(function (e) {
+          er.textContent = e.message;
+          if (/등록된 코치 이름이 아니에요/.test(e.message) && recentNames().indexOf(v) >= 0) { saveRecent(recentNames().filter(function (x) { return x !== v; })); setTimeout(function () { if (S.screen === 'entry') { render(); var e2 = document.getElementById('er'); if (e2) e2.textContent = '‘' + v + '’ 이름은 지금 등록돼 있지 않아서 목록에서 뺐어요.'; } }, 50); }
+        });
       });
     }
-    document.getElementById('enter').onclick = enter;
+    document.getElementById('enter').onclick = function () { enter(); };
+    Array.prototype.forEach.call(app.querySelectorAll('[data-rn]'), function (b) { b.onclick = function () { enter(recent[+b.getAttribute('data-rn')]); }; });
+    Array.prototype.forEach.call(app.querySelectorAll('[data-rx]'), function (b) {
+      b.onclick = function () { var n = recent[+b.getAttribute('data-rx')]; saveRecent(recent.filter(function (x) { return x !== n; })); if (ls('name') === n) ls('name', ''); render(); };
+    });
     nm.onkeydown = function (e) { if (e.key === 'Enter') enter(); };
   }
 

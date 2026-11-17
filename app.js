@@ -15,7 +15,7 @@
     setTimeout(function () { t.remove(); }, ms || 2600);
   }
   function scoreCls(v) { return v == null ? '' : (v >= 80 ? 'hi' : (v >= 60 ? 'mid' : 'lo')); }
-  function b64ToBytes(b64) { var bin = atob(b64), u = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+  function b64ToBytes(b64) { if (typeof b64 !== 'string') throw new Error('음성 데이터를 받지 못했어요. 잠시 뒤 다시 해 주세요.'); var bin; try { bin = atob(b64); } catch (e) { var c = b64.replace(/[^A-Za-z0-9+\/]/g, ''); while (c.length % 4) c += '='; bin = atob(c); } var u = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
   function bytesToB64(u8) { var s = '', CH = 0x8000; for (var i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return btoa(s); }
 
   var IC = {
@@ -973,9 +973,10 @@
     h += '</div>';
     h += '<div class="card"><b>새로 올리기</b><label class="f">목소리 이름</label><input id="rn" list="rnl" value="' + esc(RC.name) + '" placeholder="예: 원어민 원본, 주아 대표님" maxlength="20">' +
       '<datalist id="rnl">' + ['원어민 원본', '주아 대표님'].concat((mat.recs || []).map(function (r) { return r.name; })).map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist>' +
-      '<label class="f">녹음 파일</label><input id="rf" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.mp4" multiple>' +
+      '<label class="f">녹음 파일</label><label for="rf" class="btn sec">' + (RC.files.length ? '다른 파일 고르기' : '파일 고르기') + '</label><input id="rf" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.mp4" multiple style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">' +
+      '<div class="small" style="margin-top:8px;word-break:break-all">' + (RC.files.length ? '고른 파일: <b>' + RC.files.map(function (f) { return esc(f.name); }).slice(0, 3).join(', ') + (RC.files.length > 3 ? ' 외 ' + (RC.files.length - 3) + '개' : '') + '</b>' : '<span class="muted">아직 고른 파일이 없어요</span>') + '</div>' +
       '<div class="chips" style="margin-top:10px"><button class="chip' + (RC.mode === 'split' ? ' on' : '') + '" data-md="split">전체 한 파일 (자동으로 나누기)</button><button class="chip' + (RC.mode === 'files' ? ' on' : '') + '" data-md="files">문장마다 한 파일</button></div>' +
-      '<p class="small muted" style="margin:8px 0 0">' + (RC.files.length ? '고른 파일 ' + RC.files.length + '개 · ' : '') + '전체 녹음 1개를 올리면 AI 음성과 비교해서 문장 위치를 찾아 잘라요. 문장별 파일은 파일 이름의 숫자(1, 2, 3…) 순서로 문장에 붙여요. 같은 이름으로 다시 올리면 바뀌어요.</p>' +
+      '<p class="small muted" style="margin:8px 0 0">' + '전체 녹음 1개를 올리면 AI 음성과 비교해서 문장 위치를 찾아 잘라요. 문장별 파일은 파일 이름의 숫자(1, 2, 3…) 순서로 문장에 붙여요. 같은 이름으로 다시 올리면 바뀌어요.</p>' +
       '<button class="btn" id="ra" style="margin-top:12px">분석하기</button><div class="small muted" id="rp" style="margin-top:8px"></div><div class="err" id="re"></div></div>';
     if (RC.items) {
       var nChk = RC.items.filter(function (it) { return it.on && it.check; }).length;
@@ -1021,9 +1022,14 @@
       ensureCtx(); btn.disabled = true;
       var p = RC.mode === 'split' ? analyzeSplit() : analyzeFiles();
       p.then(function () { btn.disabled = false; render(); window.scrollTo(0, document.getElementById('ra').getBoundingClientRect().top + window.scrollY - 60); })
-        .catch(function (e) { btn.disabled = false; rp.textContent = ''; re.textContent = e.message || String(e); });
+        .catch(function (e) {
+          btn.disabled = false; rp.textContent = '';
+          var fr = String((e && e.stack) || '').split('\n')[0].replace(/https?:\/\/[^ ]*\//, '');
+          re.textContent = ((e && e.message) || String(e)) + (lastStep ? ' (멈춘 곳: ' + lastStep + ')' : '') + (fr ? ' [' + ((e && e.name) || '') + ' ' + fr + ']' : '');
+        });
     };
-    function prog(t) { rp.textContent = t; }
+    var lastStep = '';
+    function prog(t) { rp.textContent = t; if (t) lastStep = t; }
     function analyzeSplit() {
       var f = RC.files[0];
       if (RC.files.length > 1) return Promise.reject(new Error('전체 한 파일로 나누려면 파일을 1개만 골라 주세요.'));

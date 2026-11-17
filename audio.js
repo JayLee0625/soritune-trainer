@@ -475,14 +475,54 @@
 
   // ---------- 긴 녹음에서 문장 위치 찾기 ----------
   // 소리 특징만 빠르게 계산 (억양은 계산하지 않음): 10ms마다 MFCC와 소리 크기
-  function features(x16, onProg) {
-    var n = Math.max(0, Math.floor((x16.length - NEED) / HOP) + 1), cep = new Array(n), db = new Float32Array(n), i = 0;
+  // 배경음악 줄이기: 밴드마다 앞뒤 0.75초 동안의 중앙값(오래 이어지는 소리 = 음악·잡음)을 빼고 남은 소리로 계산
+  function features(x16, onProg, opts) {
+    opts = opts || {};
+    var n = Math.max(0, Math.floor((x16.length - NEED) / HOP) + 1), M = new Array(n), cep = new Array(n), db = new Float32Array(n), i = 0, m;
+    var clean = opts.clean !== false, W = 75, D = 4;
     return new Promise(function (res) {
       (function step() {
         var t0 = Date.now();
-        for (; i < n && Date.now() - t0 < 40; i++) { var off = i * HOP; db[i] = energyDb(x16, off); cep[i] = mfcc(x16, off); }
-        if (onProg) onProg(i / Math.max(1, n));
-        if (i < n) setTimeout(step, 0); else res({ cep: cep, db: db, n: n });
+        for (; i < n && Date.now() - t0 < 40; i++) {
+          powerSpec(x16, i * HOP, spec);
+          var e = new Float32Array(NMEL);
+          for (m = 0; m < NMEL; m++) { var sm = 0, row = melFb[m]; for (var k = 0; k <= HALF; k++) sm += row[k] * spec[k]; e[m] = sm; }
+          M[i] = e;
+        }
+        if (onProg) onProg(0.6 * i / Math.max(1, n));
+        if (i < n) return setTimeout(step, 0);
+        var B = null;
+        if (clean && n > 2 * W) {
+          // 4프레임마다 중앙값을 구하고 사이는 이어 붙임
+          var G = Math.ceil(n / D) + 1, grid = new Array(G), g = 0, buf = [];
+          (function med() {
+            var t1 = Date.now();
+            for (; g < G && Date.now() - t1 < 40; g++) {
+              var c = Math.min(n - 1, g * D), a = Math.max(0, c - W), b = Math.min(n - 1, c + W), out = new Float32Array(NMEL);
+              for (m = 0; m < NMEL; m++) { buf.length = 0; for (var j = a; j <= b; j += 3) buf.push(M[j][m]); buf.sort(function (x, y) { return x - y; }); out[m] = buf[buf.length >> 1]; }
+              grid[g] = out;
+            }
+            if (onProg) onProg(0.6 + 0.3 * g / G);
+            if (g < G) return setTimeout(med, 0);
+            B = grid; finish();
+          })();
+        } else finish();
+        function finish() {
+          for (var q = 0; q < n; q++) {
+            var e = M[q], lm = new Float32Array(NMEL), tot = 0;
+            var gi = Math.floor(q / D), fr = (q - gi * D) / D, b0 = B && B[gi], b1 = B && (B[gi + 1] || b0);
+            for (m = 0; m < NMEL; m++) {
+              var v = e[m];
+              if (b0) { var bg = b0[m] * (1 - fr) + b1[m] * fr; v = Math.max(v - bg, 0.02 * v); }
+              tot += v; lm[m] = Math.log(v + 1e-8);
+            }
+            var o = new Float32Array(NCEP);
+            for (var c2 = 1; c2 <= NCEP; c2++) { var s2 = 0; for (m = 0; m < NMEL; m++) s2 += lm[m] * Math.cos(Math.PI * c2 * (m + 0.5) / NMEL); o[c2 - 1] = s2; }
+            cep[q] = o; db[q] = 10 * Math.log10(tot / (HALF + 1) + 1e-10);
+          }
+          if (onProg) onProg(1);
+          res({ cep: cep, db: db, n: n, clean: !!B });
+        }
       })();
     });
   }
@@ -520,6 +560,95 @@
     }
     return best;
   }
+  // 음절 수 세기: 말소리 크기가 솟는 곳(모음)을 센다. 말 빠르기·쉼에 덜 흔들림
+  function nucleiPrefix(F, thr) {
+    var n = F.n, sm = new Float32Array(n), i, j, NC = new Int32Array(n + 1);
+    for (i = 0; i < n; i++) { var a = 0, c = 0; for (j = i - 3; j <= i + 3; j++) if (j >= 0 && j < n) { a += F.db[j]; c++; } sm[i] = a / c; }
+    for (i = 0; i < n; i++) {
+      var pk = 0;
+      if (i >= 5 && i < n - 5 && sm[i] > thr + 3) {
+        pk = 1;
+        for (j = i - 8; j <= i + 8; j++) if (j !== i && j >= 0 && j < n && sm[j] > sm[i]) { pk = 0; break; }
+        if (pk) { var l = sm[i], r = sm[i]; for (j = i; j >= Math.max(0, i - 25); j--) l = Math.min(l, sm[j]); for (j = i; j <= Math.min(n - 1, i + 25); j++) r = Math.min(r, sm[j]); if (sm[i] - Math.max(l, r) < 2.5) pk = 0; }
+      }
+      NC[i + 1] = NC[i] + pk;
+    }
+    return NC;
+  }
+  // 구간 안에서 말소리 시작·끝: 남은 음악보다 확실히 큰 소리(기준+6dB)가 이어지는 곳을 찾고, 앞뒤 약한 소리만 조금 붙임
+  function trimSpeech(F, thr, b0, b1) {
+    var hi = thr + 6, s0 = -1, e0 = -1, run = 0, f, lim;
+    for (f = b0; f <= b1; f++) { run = F.db[f] > hi ? run + 1 : 0; if (run >= 6) { s0 = f - 5; break; } }
+    if (s0 < 0) { s0 = b0; while (s0 < b1 && F.db[s0] <= thr) s0++; e0 = b1; while (e0 > s0 && F.db[e0] <= thr) e0--; return [s0, e0]; }
+    run = 0; for (f = b1; f >= s0; f--) { run = F.db[f] > hi ? run + 1 : 0; if (run >= 6) { e0 = f + 5; break; } }
+    lim = Math.max(b0, s0 - 10); while (s0 > lim && F.db[s0 - 1] > thr) s0--;
+    lim = Math.min(b1, e0 + 15); while (e0 < lim && F.db[e0 + 1] > thr) e0++;
+    return [s0, e0];
+  }
+  function dbThr(F) { var d = Array.prototype.slice.call(F.db); return Math.max(pct(d, 0.1) + 12, pct(d, 0.98) - 38, -58); }
+  // 기준(AI) 음성 한 문장의 말소리 길이·음절 수
+  function refStats(F, start, end) {
+    var thr = dbThr(F), NC = nucleiPrefix(F, thr), sp = 0;
+    for (var f = Math.max(0, start); f <= Math.min(F.n - 1, end); f++) if (F.db[f] > thr) sp++;
+    return { sp: sp, syl: NC[Math.min(F.n, end + 1)] - NC[Math.max(0, start)] };
+  }
+
+  // 문장 길이 + 쉼으로 나누기 (녹음이 자료 문장만 차례로 읽은 경우에 잘 맞음)
+  // refs[i].sp: 기준 음성의 말소리 프레임 수. 쉼 후보 중에서, 문장 길이 비율이 맞고 쉼이 긴 곳을 경계로 고름
+  var TUNE = { wd: 0.5, sy: 0.22 };
+  function splitByPauses(refs, F, thr, S, E) {
+    var n = refs.length, f, SP = new Int32Array(F.n + 1);
+    for (f = 0; f < F.n; f++) SP[f + 1] = SP[f] + (F.db[f] > thr ? 1 : 0);
+    var a = refs.map(function (r) { return Math.max(5, r.sp || (r.end - r.start + 1)); }), aSum = a.reduce(function (x, y) { return x + y; }, 0);
+    var hum = SP[E + 1] - SP[S], k = hum / aSum;
+    var NC = nucleiPrefix(F, thr), useSyl = refs.every(function (r) { return r.syl > 0; });
+    var y = refs.map(function (r) { return r.syl || 1; }), ySum = y.reduce(function (x, v) { return x + v; }, 0), ky = (NC[E + 1] - NC[S]) / ySum;
+    // 쉼 후보 (0.08초 이상 조용한 곳의 가운데)
+    var cand = [], str = [], run = 0;
+    for (f = S; f <= E + 1; f++) {
+      if (f <= E && F.db[f] <= thr) run++;
+      else { if (run >= 8) { cand.push(f - Math.ceil(run / 2)); str.push(Math.min(run, 80) / 100); } run = 0; }
+    }
+    // 쉼이 너무 적으면 소리가 작아지는 곳도 약한 후보로
+    if (cand.length < n * 2) {
+      for (f = S + 15; f < E - 15; f += 5) {
+        var lo = true; for (var g = f - 15; g <= f + 15; g += 3) if (F.db[g] < F.db[f]) { lo = false; break; }
+        if (lo) { cand.push(f); str.push(0); }
+      }
+      var ord = cand.map(function (c, i) { return i; }).sort(function (x, y) { return cand[x] - cand[y]; });
+      cand = ord.map(function (i) { return cand[i]; }); str = ord.map(function (i) { return str[i]; });
+    }
+    var C = cand.length, P = [S].concat(cand, [E + 1]), ST = [0].concat(str, [0]), NP = P.length, SIG = 0.25, BETA = 2, WD = TUNE.wd, SY = TUNE.sy;
+    if (C < n - 1) return null;
+    // 음절 수 비율(주)과 말소리 길이 비율(보조)이 기준 음성과 비슷할수록 좋음
+    function cost(i, p0, p1) {
+      var h = SP[P[p1]] - SP[P[p0]]; if (h < 3) return 1e9;
+      var r = Math.log((h + 20) / (k * a[i] + 20)), c = r * r / (SIG * SIG);
+      if (useSyl) { var hy = NC[P[p1]] - NC[P[p0]], ry = Math.log((hy + 1.5) / (ky * y[i] + 1.5)); c = WD * c + ry * ry / (SY * SY); }
+      return c;
+    }
+    var INF = 1e18, dp = [], bk = [], i, p, q;
+    for (i = 0; i < n; i++) { dp.push(new Float64Array(NP).fill(INF)); bk.push(new Int32Array(NP).fill(-1)); }
+    for (p = 1; p < NP; p++) { dp[0][p] = cost(0, 0, p) - (p < NP - 1 ? BETA * ST[p] : 0); bk[0][p] = 0; }
+    for (i = 1; i < n; i++) for (p = i + 1; p < NP; p++) {
+      if (i === n - 1 && p !== NP - 1) continue;
+      var best = INF, bq = -1;
+      for (q = i; q < p; q++) { if (dp[i - 1][q] >= INF) continue; var v = dp[i - 1][q] + cost(i, q, p); if (v < best) { best = v; bq = q; } }
+      dp[i][p] = best - (p < NP - 1 ? BETA * ST[p] : 0); bk[i][p] = bq;
+    }
+    if (n === 1) { dp[0][NP - 1] = cost(0, 0, NP - 1); bk[0][NP - 1] = 0; }
+    var bounds = new Array(n + 1); bounds[n] = NP - 1;
+    for (i = n - 1; i >= 0; i--) { bounds[i] = bk[i][bounds[i + 1]]; if (bounds[i] < 0) return null; }
+    var out = [];
+    for (i = 0; i < n; i++) {
+      var b0 = P[bounds[i]], b1 = P[bounds[i + 1]] - 1, se = trimSpeech(F, thr, b0, b1), s0 = se[0], e0 = se[1];
+      var h = SP[b1 + 1] - SP[b0], dev = Math.abs(Math.log(h / (k * a[i])));
+      if (useSyl) dev = Math.max(dev * 0.7, Math.abs(Math.log((NC[b1 + 1] - NC[b0] + 1.5) / (ky * y[i] + 1.5))));
+      out.push({ s: s0, e: e0, L: b0, R: b1, cost: dev, check: dev > 0.35 || (i > 0 && ST[bounds[i]] === 0) });
+    }
+    return out;
+  }
+
   // refs: 문장별 기준 음성 분석 [{cep, start, end}], F: 긴 녹음 features() 결과
   // → 문장별 [{t0, t1, cost, check}] (초, 앞뒤 여유 포함)
   function splitLong(refs, F, onProg, opts) {
@@ -530,6 +659,20 @@
     var tempo = [];
     var SP = new Int32Array(F.n + 1); for (var z = 0; z < F.n; z++) SP[z + 1] = SP[z] + (F.db[z] > thr ? 1 : 0);
     return new Promise(function (res) {
+        // 녹음 전체가 자료 문장 길이와 비슷하면 '길이 + 쉼' 방식으로 (배경음악·빠른 말에도 잘 맞음)
+        var S = 0, E = F.n - 1, run2 = 0, z2;
+        for (z2 = 0; z2 < F.n; z2++) { run2 = F.db[z2] > thr ? run2 + 1 : 0; if (run2 >= 5) { S = z2 - 4; break; } }
+        run2 = 0; for (z2 = F.n - 1; z2 >= 0; z2--) { run2 = F.db[z2] > thr ? run2 + 1 : 0; if (run2 >= 5) { E = z2 + 4; break; } }
+        var aSum2 = refs.reduce(function (x, r) { return x + Math.max(5, r.sp || (r.end - r.start + 1)); }, 0), ratio = (SP[E + 1] - SP[S]) / aSum2;
+        if (opts.mode !== 'dtw' && ratio > 0.5 && ratio < 2.2) {
+          var dpo = splitByPauses(refs, F, thr, S, E);
+          if (dpo) {
+            return res(dpo.map(function (o, i) {
+              var f0 = i === 0 ? Math.max(0, o.s - 15) : Math.max(o.L, o.s - 15), f1 = i === dpo.length - 1 ? Math.min(F.n - 1, o.e + 20) : Math.min(o.R, o.e + 20);
+              return { t0: Math.max(0, f0 * HOP / SR), t1: f1 * HOP / SR + WIN / SR, cost: o.cost, check: o.check, how: 'pause' };
+            }));
+          }
+        }
       (function step() {
         if (k >= refs.length) return finishUp();
         var r = refs[k], Q = normCep(r.cep, r.start, r.end), N = Q.length;
@@ -588,7 +731,7 @@
     return buf;
   }
 
-  var api = { SR: SR, HOP: HOP, t2f: t2f, f2t: f2t, Stream: Stream, mapTimes: mapTimes, resample: resample, analyze: analyze, Tracker: Tracker, liveSemitones: liveSemitones, compare: compare, wordFrames: wordFrames, wav: wavBlobBytes, features: features, splitLong: splitLong };
+  var api = { SR: SR, HOP: HOP, t2f: t2f, f2t: f2t, Stream: Stream, mapTimes: mapTimes, resample: resample, analyze: analyze, Tracker: Tracker, liveSemitones: liveSemitones, compare: compare, wordFrames: wordFrames, wav: wavBlobBytes, features: features, splitLong: splitLong, refStats: refStats, dbThr: dbThr, trimSpeech: trimSpeech, TUNE: TUNE };
   root.Pitch = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

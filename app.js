@@ -195,7 +195,8 @@
         var p = c.decodeAudioData(bytes.buffer.slice(0), res, rej);
         if (p && p.then) p.then(res, rej);
       }).then(function (buf) {
-        return { url: url, an: Pitch.analyze(Pitch.resample(buf.getChannelData(0), buf.sampleRate)), dur: buf.duration };
+        var x16 = Pitch.resample(buf.getChannelData(0), buf.sampleRate);
+        return { url: url, an: Pitch.analyze(x16), x16: x16, dur: buf.duration };
       });
     });
   }
@@ -893,6 +894,68 @@
     it.url = URL.createObjectURL(new Blob([Pitch.wav(cutSeg(it), 24000)], { type: 'audio/wav' })); it.uk = it.t0 + ':' + it.t1;
     return it.url;
   }
+  // 들으면서 나누기: 누른 시각 근처(조금 앞)의 가장 긴 쉼으로 맞춤
+  function snapPause(t, lo, hi) {
+    var F = RC.F, thr = RC.thr, hs = Pitch.HOP / 16000, f;
+    var f0 = Math.max(1, Math.round((t - lo) / hs)), f1 = Math.min(F.n - 2, Math.round((t + hi) / hs)), best = -1, bl = 0, run = 0;
+    for (f = f0; f <= f1 + 1; f++) {
+      if (f <= f1 && F.db[f] <= thr) run++;
+      else { if (run > bl) { bl = run; best = f - Math.ceil(run / 2); } run = 0; }
+    }
+    if (best < 0) { var mn = 1e9; for (f = f0; f <= f1; f++) if (F.db[f] < mn) { mn = F.db[f]; best = f; } }
+    return best * hs;
+  }
+  function itemsFromMarks(marks) {
+    var F = RC.F, thr = RC.thr, hs = Pitch.HOP / 16000, n = RC.mat.sentences.length, dur = RC.long.length / 24000, f, run = 0, S = 0, E = F.n - 1;
+    function sp(q) { return F.db[q] > thr; }
+    for (f = 0; f < F.n; f++) { run = sp(f) ? run + 1 : 0; if (run >= 5) { S = f - 4; break; } }
+    run = 0; for (f = F.n - 1; f >= 0; f--) { run = sp(f) ? run + 1 : 0; if (run >= 5) { E = f + 4; break; } }
+    var B = [S].concat(marks.map(function (t) { return Math.round(t / hs); }), [E + 1]), out = [];
+    for (var i = 0; i < n; i++) {
+      var b0 = B[i], b1 = Math.max(b0 + 1, B[i + 1] - 1), se = Pitch.trimSpeech(F, thr, b0, b1), s0 = se[0], e0 = se[1];
+      var f0 = i === 0 ? Math.max(0, s0 - 15) : Math.max(b0, s0 - 15), f1 = i === n - 1 ? Math.min(F.n - 1, e0 + 20) : Math.min(b1, e0 + 20);
+      out.push({ on: true, t0: Math.round(f0 * hs * 100) / 100, t1: Math.min(dur, Math.round((f1 * hs + 0.03) * 100) / 100), check: false });
+    }
+    return out;
+  }
+  function tapMark() {
+    var sens = RC.mat.sentences, n = sens.length, marks = [], raf = 0;
+    if (n < 2) return toast('문장이 1개라 나눌 필요가 없어요.');
+    stopPlay();
+    var au = new Audio(URL.createObjectURL(RC.files[0]));
+    var m = document.createElement('div'); m.className = 'modal';
+    m.innerHTML = '<div class="sheet"><b>들으면서 나누기</b><div class="small muted" style="margin:4px 0 8px">문장이 끝나면 바로 아래 버튼을 눌러 주세요. 조금 늦게 눌러도 근처의 쉬는 곳으로 맞춰요.</div>' +
+      '<div class="small" id="tmS" style="min-height:3.2em"></div><div class="prog"><i id="tmB" style="width:0"></i></div><div class="small muted" id="tmT"></div>' +
+      '<button class="btn" id="tmM" style="margin-top:10px"></button><div class="row" style="margin-top:8px"><button class="btn sec" id="tmU">한 칸 되돌리기</button><button class="btn sec" id="tmX">그만두기</button></div></div>';
+    document.body.appendChild(m);
+    var tS = m.querySelector('#tmS'), tB = m.querySelector('#tmB'), tT = m.querySelector('#tmT'), tM = m.querySelector('#tmM');
+    function show() {
+      var k = marks.length;
+      tS.innerHTML = '<b>지금 ' + (k + 1) + '번</b> ' + esc(sens[k].en) + (k + 1 < n ? '<br><span class="muted">다음 ' + (k + 2) + '번: ' + esc(sens[k + 1].en) + '</span>' : '');
+      tM.textContent = k + 1 < n ? (k + 1) + '번 끝 → ' + (k + 2) + '번 시작' : '완료 (다시 나누기)';
+    }
+    function tick() { var d = au.duration || RC.long.length / 24000; tB.style.width = Math.min(100, au.currentTime / d * 100) + '%'; tT.textContent = au.currentTime.toFixed(1) + ' / ' + d.toFixed(1) + '초 · 표시 ' + marks.length + '/' + (n - 1); raf = requestAnimationFrame(tick); }
+    function close(done) {
+      cancelAnimationFrame(raf); try { au.pause(); } catch (e) { } try { URL.revokeObjectURL(au.src); } catch (e) { } m.remove();
+      if (done) { RC.items = itemsFromMarks(marks); toast('다시 나눴어요. 문장마다 들어서 확인해 주세요.', 3500); render(); }
+    }
+    tM.onclick = function () {
+      if (marks.length >= n - 1) return close(true);
+      var t = Math.max(0, au.currentTime - 0.15), prev = marks.length ? marks[marks.length - 1] + 0.3 : 0;
+      var sn = snapPause(t, 0.7, 0.3); if (sn <= prev) sn = Math.max(prev, t);
+      marks.push(sn); show();
+    };
+    m.querySelector('#tmU').onclick = function () {
+      if (!marks.length) return;
+      marks.pop(); show();
+      au.currentTime = Math.max(0, (marks.length ? marks[marks.length - 1] : 0) - 1);
+      au.play().catch(function () { });
+    };
+    m.querySelector('#tmX').onclick = function () { close(false); };
+    au.onended = function () { if (marks.length >= n - 1) close(true); else { tM.textContent = '끝까지 들었어요 · 되돌리기로 다시 표시해 주세요'; } };
+    show(); tick();
+    au.play().catch(function (e) { toast('재생을 시작하지 못했어요: ' + e.message, 4000); });
+  }
   function vAdminRec() {
     if (!RC || !AD) return go('admin', false);
     var mat = AD.materials.filter(function (x) { return x.id === RC.mid; })[0];
@@ -917,6 +980,7 @@
     if (RC.items) {
       var nChk = RC.items.filter(function (it) { return it.on && it.check; }).length;
       h += '<p class="small muted" style="margin:0 0 8px">' + (RC.mode === 'split' ? '자동으로 나눈 결과예요. 듣기로 확인하고, 앞뒤가 잘렸으면 ◀ ▶로 0.2초씩 고쳐 주세요.' : '문장마다 붙은 파일이에요. 틀린 곳은 바꿔 주세요.') + (nChk ? ' <b style="color:var(--warn)">확인 필요 ' + nChk + '개</b>' : '') + '</p>';
+      if (RC.mode === 'split' && RC.F) h += '<div class="card"><b>잘못 나뉜 곳이 있나요?</b><div class="small muted" style="margin:4px 0 8px">전체 녹음을 들으면서 문장이 끝날 때마다 버튼을 누르면, 그 근처의 쉬는 곳으로 다시 나눠요. 1분 녹음이면 1분이면 끝나요.</div><button class="btn sec" id="tapGo">' + IC.play + '들으면서 직접 나누기</button></div>';
       RC.items.forEach(function (it, i) {
         var s = sens[i];
         h += '<div class="card rrow' + (it.on ? '' : ' off') + '" style="padding:12px 14px"><div class="row" style="align-items:flex-start"><div style="flex:1;min-width:0"><b>' + s.n + '</b> <span class="small">' + esc(s.en) + '</span></div>' +
@@ -974,6 +1038,7 @@
         x16 = Pitch.resample(RC.long, 24000);
         return Pitch.features(x16, function (r) { prog('소리 분석 중… ' + Math.round(r * 100) + '%'); });
       }).then(function (F) {
+        RC.Fl = F;
         // 녹음 목소리 높이: 처음 말소리부터 20초
         var peak = -100, z; for (z = 0; z < F.n; z++) if (F.db[z] > peak) peak = F.db[z];
         for (z = 0; z < F.n && F.db[z] < peak - 30; z++);
@@ -988,11 +1053,12 @@
           if (k >= sens.length) return Promise.resolve();
           prog('AI 음성 불러오는 중… ' + (k + 1) + '/' + sens.length);
           var s = sens[k], key = s.voices[RC.refKey] ? RC.refKey : firstAi(s);
-          return loadRef(s, key).then(function (r) { refs.push({ cep: r.an.cep, start: r.an.start, end: r.an.end }); k++; return next(); });
+          return loadRef(s, key).then(function (r) { return Pitch.features(r.x16, null, {}).then(function (fa) { var st = Pitch.refStats(fa, r.an.start, r.an.end); refs.push({ cep: fa.cep, start: r.an.start, end: r.an.end, sp: st.sp, syl: st.syl }); k++; return next(); }); });
         }
         return pick.then(next).then(function () { return Pitch.splitLong(refs, F, function (r) { prog('문장 위치 찾는 중… ' + Math.round(r * 100) + '%'); }); });
       }).then(function (segs) {
         RC.items = segs.map(function (g) { return { on: true, t0: g.t0, t1: g.t1, check: g.check }; });
+        RC.F = RC.Fl; RC.thr = Pitch.dbThr(RC.F);
         prog('');
       });
     }
@@ -1026,6 +1092,7 @@
       });
       Array.prototype.forEach.call(app.querySelectorAll('[data-fs]'), function (sel) { sel.onchange = function () { RC.items[+sel.getAttribute('data-fs')].fi = +sel.value; }; });
       document.getElementById('rs').onclick = function () { saveRec(); };
+      var tgo = document.getElementById('tapGo'); if (tgo) tgo.onclick = tapMark;
     }
   }
   function saveRec() {
@@ -1058,7 +1125,13 @@
         })).then(function (ds) { ds.sort(function (x, y) { return x.d - y.d; }); RC.refKey = ds[0].key; });
         return kp.then(function () {
         var key = RC.refKey && s.voices[RC.refKey] ? RC.refKey : firstAi(s);
-        var tp = key ? loadRef(s, key).then(function (r) { return r.times ? Pitch.mapTimes(r.an, r.times, an) : null; }).catch(function () { return null; }) : Promise.resolve(null);
+        // 단어 시간: 배경음악을 줄인 소리 특징으로 AI 음성과 맞춰서 옮김
+        var tp = key ? loadRef(s, key).then(function (r) {
+          if (!r.times) return null;
+          return Promise.all([Pitch.features(r.x16, null, {}), Pitch.features(a.x16, null, {})]).then(function (ff) {
+            return Pitch.mapTimes({ cep: ff[0].cep, n: ff[0].n, start: r.an.start, end: Math.min(r.an.end, ff[0].n - 1) }, r.times, { cep: ff[1].cep, n: ff[1].n, start: an.start, end: Math.min(an.end, ff[1].n - 1) });
+          });
+        }).catch(function () { return null; }) : Promise.resolve(null);
         return tp.then(function (times) { return call('adminSaveRec', { pin: S.pin, sid: s.id, name: name, b64: a.b64, mime: a.mime, times: times }); });
         });
       });
@@ -1083,5 +1156,5 @@
   try { history.replaceState({ s: 'entry' }, ''); } catch (e) { }
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.__MOCK_API) navigator.serviceWorker.register('sw.js').catch(function () { });
-  window.__app = { S: S, go: go, render: render, rc: function () { return RC; } };
+  window.__app = { S: S, go: go, render: render, rc: function () { return RC; }, rcMarks: function (m) { RC.items = itemsFromMarks(m); render(); } };
 })();

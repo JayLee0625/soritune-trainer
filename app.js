@@ -627,7 +627,12 @@
       if (v.length < 4) { pe.textContent = '4자 이상으로 해 주세요.'; return; }
       if (!has) {
         if (m.querySelector('#p2').value !== v) { pe.textContent = '두 번 입력한 비밀번호가 달라요.'; return; }
-        call('adminSetPin', { pin: v }).then(function () { S.boot.hasPin = true; S.pin = v; ss('pin', v); m.remove(); adminLoad(function () { go('admin'); }); }).catch(function (e) { pe.textContent = e.message; });
+        call('adminSetPin', { pin: v }).then(function () { S.boot.hasPin = true; S.pin = v; ss('pin', v); m.remove(); adminLoad(function () { go('admin'); }); }).catch(function (e) {
+          if (!/이미 비밀번호/.test(e.message)) { pe.textContent = e.message; return; }
+          // 비밀번호가 이미 있으면: 방금 넣은 것으로 바로 들어가 보고, 틀리면 비밀번호 넣는 창으로
+          S.boot.hasPin = true; S.pin = v;
+          adminLoad(function () { ss('pin', v); m.remove(); go('admin'); }, function () { m.remove(); ss('pin', null); S.pin = ''; adminGate(); var pe2 = document.getElementById('pe'); if (pe2) pe2.textContent = '이미 정해 둔 비밀번호가 있어요. 그 비밀번호를 넣어 주세요.'; });
+        });
       } else {
         S.pin = v;
         adminLoad(function () { ss('pin', v); m.remove(); go('admin'); }, function (e) { pe.textContent = e.message; });
